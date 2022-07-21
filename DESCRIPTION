@@ -18,7 +18,10 @@ Imports:
     moments,
     ranger,
     RcppRoll,
+    rstickleback,
     tidyverse,
     zoo
+Remotes:
+    FlukeAndFeather/rstickleback
 Suggests: devtools,
     git2r

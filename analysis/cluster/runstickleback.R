@@ -1,3 +1,5 @@
+#!/usr/bin/env Rscript
+
 library(moments)
 library(ranger)
 library(RcppRoll)
@@ -5,16 +7,19 @@ library(rstickleback)
 library(tidyverse)
 library(zoo)
 
-# Settings ----------------------------------------------------------------
+# Parameters --------------------------------------------------------------
 
-win_size <- 100
-tol <- 5
-deploy_sample <- 4
-n_train <- 2 # deployments
-t_train <- 0.5 # hours
-sb_trees <- 2L
-rf_trees <- 8
-n_trials <- 2
+args <- commandArgs(trailingOnly=TRUE)
+if (length(args) != 7) {
+  stop("Requires 8 arguments: win_size, tol, n_train, t_train, sb_trees, rf_trees, n_trials")
+}
+win_size <- as.integer(args[1])
+tol <- as.double(args[2])
+n_train <- as.integer(args[3]) # deployments
+t_train <- as.double(args[4]) # hours
+sb_trees <- as.integer(args[5])
+rf_trees <- as.integer(args[6])
+n_trials <- as.integer(args[7])
 
 # Read data ---------------------------------------------------------------
 
