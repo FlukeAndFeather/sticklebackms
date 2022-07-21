@@ -1,10 +1,10 @@
 Package: sticklebackms
-Title: What the Package Does (One Line, Title Case)
+Title: Stickleback Manuscript
 Version: 0.0.0.9000
 Authors@R:
     person("Max", "Czapanskiy", , "maxczap@stanford.edu", role = c("aut", "cre"),
            comment = c("ORCID-ID" = "0000-0002-6302-905X"))
-Description: What the package does (one paragraph).
+Description: Compare Stickleback accuracy against a random forest.
 License: MIT + file LICENSE
 ByteCompile: true
 Encoding: UTF-8
@@ -14,6 +14,11 @@ RoxygenNote: 7.2.0
 Imports: 
     arrow,
     bookdown,
-    here
+    here,
+    moments,
+    ranger,
+    RcppRoll,
+    tidyverse,
+    zoo
 Suggests: devtools,
     git2r

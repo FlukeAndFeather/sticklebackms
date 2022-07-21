@@ -5,25 +5,25 @@ library(rstickleback)
 library(tidyverse)
 library(zoo)
 
-
 # Settings ----------------------------------------------------------------
 
 win_size <- 100
 tol <- 5
-deploy_sample <- 5
+deploy_sample <- 4
 n_train <- 2 # deployments
-t_train <- 1 # hours
+t_train <- 0.5 # hours
 sb_trees <- 2L
-rf_trees <- 10
+rf_trees <- 8
 n_trials <- 2
 
 # Read data ---------------------------------------------------------------
 
+keep <- c("bw170815-21", "bw180830-48", "bw180827-53", "bw180830-52b")
 events <- arrow::read_parquet("analysis/data/raw_data/events.parquet") %>%
   filter(event == "lunge",
-         deployid %in% sample(unique(deployid), deploy_sample))
+         deployid %in% keep)
 sensors <- arrow::read_parquet("analysis/data/raw_data/sensors.parquet") %>%
-  filter(deployid %in% unique(events$deployid))
+  filter(deployid %in% keep)
 
 # Utility functions -------------------------------------------------------
 
@@ -46,6 +46,7 @@ create_features <- function(sensors) {
     group_by(deployid) %>%
     mutate(across(c(depth, pitch, roll, speed),
                   stat_fns)) %>%
+    ungroup() %>%
     left_join(events, by = c("deployid", "datetime")) %>%
     mutate(event = factor(ifelse(is.na(event), "non-event", "event"))) %>%
     drop_na()
@@ -55,7 +56,8 @@ durations <- function(sensors) {
   sensors %>%
     group_by(deployid) %>%
     summarize(d = max(datetime) - min(datetime)) %>%
-    pull(d)
+    pull(d) %>%
+    as.numeric(unit = "secs")
 }
 
 f1 <- function(tp, fp, fn) {
@@ -71,17 +73,24 @@ delta_r <- function(tp, fp, fn, d) {
 assess_rf <- function(p, features, sensors, events) {
   features <- features %>%
     mutate(class = p$predictions) %>%
-    filter(class == "non-event")
+    filter(class == "event")
   assess_deployment <- function(f, e) {
-    e <- e %>%
-      mutate(nearest = f$datetime[findInterval(e, f$datetime)],
-             error = abs(as.numeric(datetime - nearest, unit = "secs")),
-             outcome = ifelse(error < tol, "tp", "fn"))
-    f <- anti_join(f, e, by = c("deployid", "datetime"))
+    if (nrow(f) == 0) {
+      e2 <- e %>%
+        mutate(nearest = NA,
+               error = Inf,
+               outcome = "fn")
+    } else {
+      e2 <- e %>%
+        mutate(nearest = f$datetime[findInterval(datetime, f$datetime)],
+               error = abs(as.numeric(datetime - nearest, unit = "secs")),
+               outcome = ifelse(error < tol, "tp", "fn"))
+    }
+    f2 <- anti_join(f, e2, by = c("deployid", "datetime"))
 
-    tibble(tp = sum(e$outcome == "tp"),
-           fp = nrow(f),
-           fn = sum(e$outcome = "fn"))
+    tibble(tp = sum(e2$outcome == "tp"),
+           fp = nrow(f2),
+           fn = sum(e2$outcome == "fn"))
   }
   map_dfr(unique(events$deployid),
           ~ assess_deployment(filter(features, deployid == .x),
@@ -117,21 +126,22 @@ split_data <- function(sensors, events) {
     # Assumes x within y
     stopifnot(x[1] > y[1],
               x[length(x)] < y[length(y)])
+
     y[findInterval(x, y)]
   }
   train_events <- map_dfr(deployids, function(id) {
     start_time <- start_times[[id]]
     valid_times <- sensors$datetime[sensors$deployid == id]
     events %>%
-      filter(deployid == id,
-             # Filter out events near boundaries
-             datetime > start_time + win_size / 2 / 10,
-             datetime < start_time + 3600 * t_train - win_size / 2 / 10) %>%
-      mutate(datetime = set_nearest(datetime, valid_times))
+        filter(deployid == id,
+               # Filter out events near boundaries
+               datetime > start_time + win_size / 2 / 10,
+               datetime < start_time + 3600 * t_train - win_size / 2 / 10) %>%
+        mutate(datetime = set_nearest(datetime, valid_times))
   })
 
   test_sensors <- anti_join(sensors, train_sensors, by = "deployid")
-  test_events <- anti_join(sensors, train_sensors, by = "deployid") %>%
+  test_events <- anti_join(events, train_events, by = "deployid") %>%
     group_by(deployid) %>%
     mutate(
       datetime = set_nearest(
@@ -158,7 +168,7 @@ train_stickleback <- function(sensors, events) {
   tsc <- compose_tsc(module = "interval_based",
                      algorithm = "TimeSeriesForestClassifier",
                      params = list(n_estimators = sb_trees),
-                     columns = columns(train_sensors))
+                     columns = columns(sensors))
   sb <- Stickleback(tsc,
                     win_size = win_size,
                     tol = tol,
@@ -177,6 +187,8 @@ train_randomforest <- function(sensors, events) {
 }
 
 test_stickleback <- function(m, sensors, events) {
+  d <- durations(sensors)
+
   sensors <- Sensors(sensors,
                      "deployid",
                      "datetime",
@@ -186,7 +198,7 @@ test_stickleback <- function(m, sensors, events) {
                    "datetime")
 
   p <- sb_predict(m, sensors)
-  o <- sb_assess(m, p, events)@.data %>%
+  o <- sb_assess(m, p, events) %>%
     as.data.frame() %>%
     group_by(deployid) %>%
     summarize(tp = sum(outcome == "TP"),
@@ -194,29 +206,18 @@ test_stickleback <- function(m, sensors, events) {
               fn = sum(outcome == "FN"))
 
   list(f1 = with(o, f1(tp, fp, fn)),
-       delta_r = with(o, delta_r(tp, fp, fn, durations(sensors))))
+       delta_r = with(o, delta_r(tp, fp, fn, d)))
 }
 
 test_randomforest<- function(m, sensors, events) {
+  d <- durations(sensors)
   features <- create_features(sensors)
 
   p <- predict(m, features)
   o <- assess_rf(p, features, sensors, events)
 
   list(f1 = with(o, f1(tp, fp, fn)),
-       delta_r = with(o, delta_r(tp, fp, fn, durations(sensors))))
-}
-
-## Save results -----------------------------------------------------------
-
-save_results <- function(trial, train_test, sb_results, rf_results) {
-  result_dir <- "analysis/data/derived_data/cv_results"
-  if (!dir.exists(result_dir)) dir.create(result_dir)
-  trial_dir <- sprintf("trial%02.0f", trial)
-  dir.create(file.path(result_dir, trial_dir))
-  unique(train_test$train_events$deployid) %>%
-    writeLines(file.path(result_dir, trial_dir, "train_deployids.txt"))
-
+       delta_r = with(o, delta_r(tp, fp, fn, d)))
 }
 
 # Run cross validation ----------------------------------------------------
