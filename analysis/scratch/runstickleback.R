@@ -10,6 +10,7 @@ library(zoo)
 
 win_size <- 100
 tol <- 5
+deploy_sample <- 5
 n_train <- 2 # deployments
 t_train <- 1 # hours
 sb_trees <- 2L
@@ -20,7 +21,7 @@ n_trials <- 2
 
 events <- arrow::read_parquet("analysis/data/raw_data/events.parquet") %>%
   filter(event == "lunge",
-         deployid %in% sample(unique(deployid), 10))
+         deployid %in% sample(unique(deployid), deploy_sample))
 sensors <- arrow::read_parquet("analysis/data/raw_data/sensors.parquet") %>%
   filter(deployid %in% unique(events$deployid))
 
