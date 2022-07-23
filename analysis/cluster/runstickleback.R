@@ -1,5 +1,6 @@
 #!/usr/bin/env Rscript
 
+library(furrr)
 library(moments)
 library(ranger)
 library(RcppRoll)
@@ -9,30 +10,76 @@ library(zoo)
 
 # Parameters --------------------------------------------------------------
 
-args <- commandArgs(trailingOnly=TRUE)
-if (length(args) != 7) {
-  stop("Requires 8 arguments: win_size, tol, n_train, t_train, sb_trees, rf_trees, n_trials")
+test_local <- TRUE
+
+if (!test_local) {
+  args <- commandArgs(trailingOnly=TRUE)
+  if (length(args) != 10) {
+    stop("Requires 10 arguments: win_size, tol, n_train, t_train, n_test, t_test, sb_trees, rf_trees, n_trials, n_cpu")
+  }
+  params <- list(
+    win_size = as.integer(args[1]),
+    tol = as.double(args[2]),
+    n_train = as.integer(args[3]), # deployments
+    t_train = as.double(args[4]), # hours
+    n_test = as.integer(args[5]),
+    t_test = as.double(args[6]),
+    sb_trees = as.integer(args[7]),
+    rf_trees = as.integer(args[8]),
+    n_trials = as.integer(args[9]),
+    n_cpu = as.integer(args[10])
+  )
+} else {
+  params <- list(
+    win_size = 40L,
+    tol = 5,
+    n_train = 2L, # deployments
+    t_train = 1, # hours
+    n_test = 2L,
+    t_test = 1,
+    sb_trees = 2L,
+    rf_trees = 8L,
+    n_trials = 2L,
+    n_cpu = 1L
+  )
 }
-win_size <- as.integer(args[1])
-tol <- as.double(args[2])
-n_train <- as.integer(args[3]) # deployments
-t_train <- as.double(args[4]) # hours
-sb_trees <- as.integer(args[5])
-rf_trees <- as.integer(args[6])
-n_trials <- as.integer(args[7])
 
 # Read data ---------------------------------------------------------------
 
-keep <- c("bw170815-21", "bw180830-48", "bw180827-53", "bw180830-52b")
 events <- arrow::read_parquet("analysis/data/raw_data/events.parquet") %>%
-  filter(event == "lunge",
-         deployid %in% keep)
-sensors <- arrow::read_parquet("analysis/data/raw_data/sensors.parquet") %>%
-  filter(deployid %in% keep)
+  filter(event == "lunge")
+sensors <- arrow::read_parquet("analysis/data/raw_data/sensors.parquet")
+
+## Fix data error ---------------------------------------------------------
+
+# Fix an error in deployment in bw180830-42 where 2 records are out of order
+# bw180830_42_old <- sensors %>%
+#   filter(deployid == "bw180830-42",
+#          lead(datetime, default = Sys.time()) > datetime)
+# dt <- range(bw180830_42_old$datetime)
+# bw180830_42 <- tibble(
+#   deployid = "bw180830-42",
+#   datetime = seq(dt[1], dt[2], by = 0.1)
+# )
+# for (col in c("depth", "pitch", "roll", "jerk", "speed")) {
+#   bw180830_42[[col]] <- approx(bw180830_42_old$datetime,
+#                                bw180830_42_old[[col]],
+#                                xout = bw180830_42$datetime)$y
+# }
+# sensors <- sensors %>%
+#   filter(deployid != "bw180830-42") %>%
+#   rbind(bw180830_42)
+# rm(dt, bw180830_42, col)
+
+# Fix an error where 5 deployments have missing speed values
+missing_speed <- c("bw180828-49", "bw180830-42", "bw180830-48", "bw180905-42")
+events <- filter(events, !deployid %in% missing_speed)
+sensors <- filter(sensors, !deployid %in% missing_speed)
 
 # Utility functions -------------------------------------------------------
 
-create_features <- function(sensors) {
+create_features <- function(sensors, params) {
+  win_size <- params$win_size
   roll_fn <- function(fn) {
     function(x) fn(x, n = win_size, fill = NA, align = "center")
   }
@@ -75,7 +122,8 @@ delta_r <- function(tp, fp, fn, d) {
   abs((r - r_hat) / r)
 }
 
-assess_rf <- function(p, features, sensors, events) {
+assess_rf <- function(p, features, sensors, events, params) {
+  tol <- params$tol
   features <- features %>%
     mutate(class = p$predictions) %>%
     filter(class == "event")
@@ -86,10 +134,15 @@ assess_rf <- function(p, features, sensors, events) {
                error = Inf,
                outcome = "fn")
     } else {
-      e2 <- e %>%
-        mutate(nearest = f$datetime[findInterval(datetime, f$datetime)],
-               error = abs(as.numeric(datetime - nearest, unit = "secs")),
-               outcome = ifelse(error < tol, "tp", "fn"))
+      tryCatch({
+        fdt <- c(min(f$datetime, e$datetime) - 1,
+                 f$datetime,
+                 max(f$datetime, e$datetime + 1))
+        e2 <- e %>%
+          mutate(nearest = fdt[findInterval(datetime, fdt)],
+                 error = abs(as.numeric(datetime - nearest, unit = "secs")),
+                 outcome = ifelse(error < tol, "tp", "fn"))
+      }, error = function(err) browser())
     }
     f2 <- anti_join(f, e2, by = c("deployid", "datetime"))
 
@@ -105,14 +158,17 @@ assess_rf <- function(p, features, sensors, events) {
 
 ## Split data into train/test ---------------------------------------------
 
-split_data <- function(sensors, events) {
-  # Randomly sample up to two hours of data from five deployments
+split_data <- function(sensors, events, data_dir, i, params) {
+  n_train <- params$n_train
+  t_train <- params$t_train
+  n_test <- params$n_test
+  win_size <- params$win_size
+  buffer <- win_size / 2 / 10 + 1
+
+  # Randomly sample up to [t_train] hours of data from [n_train] deployments
   deployids <- sample(unique(events$deployid), size = n_train, replace = FALSE)
   get_start <- function(deployid) {
     e_t <- events$datetime[events$deployid == deployid]
-    # Buffer according to window size such that at least one event falls within
-    # the sample window
-    buffer <- win_size / 2 / 10 + 1
     result <- sample(e_t, 1) - runif(1, buffer, t_train * 3600 - buffer)
   }
   start_times <- map(deployids, get_start)
@@ -140,58 +196,125 @@ split_data <- function(sensors, events) {
     events %>%
         filter(deployid == id,
                # Filter out events near boundaries
-               datetime > start_time + win_size / 2 / 10,
-               datetime < start_time + 3600 * t_train - win_size / 2 / 10) %>%
+               datetime > start_time + buffer,
+               datetime < start_time + 3600 * t_train - buffer) %>%
         mutate(datetime = set_nearest(datetime, valid_times))
   })
 
-  test_sensors <- anti_join(sensors, train_sensors, by = "deployid")
-  test_events <- anti_join(events, train_events, by = "deployid") %>%
-    group_by(deployid) %>%
-    mutate(
-      datetime = set_nearest(
-        datetime,
-        test_sensors$datetime[test_sensors$deployid == deployid[1]]
-      )
+  test_sample <- function(datetime) {
+    t0 <- datetime[1]
+    t1 <- datetime[length(datetime)]
+    frac <- runif(1)
+    rng <- as.numeric(t1 - t_train * 3600 - t0,
+                      unit = "secs")
+    if (rng < 0) {
+      sample_start <- t0
+    } else {
+      sample_start <- t0 + frac * rng
+    }
+    datetime >= sample_start & datetime <= sample_start + t_train * 3600
+  }
+
+  # Needs refactoring SO BAD
+  test_deployids <- sample(
+    setdiff(unique(events$deployid), deployids),
+    size = n_test,
+    replace = FALSE
+  )
+  start_times <- map(test_deployids, get_start)
+  names(start_times) <- test_deployids
+  test_sensors <- map_dfr(test_deployids, function(id) {
+    start_time <- start_times[[id]]
+    sensors %>%
+      filter(deployid == id,
+             datetime >= start_time,
+             datetime <= start_time + 3600 * t_train)
+  })
+  test_events <- map_dfr(test_deployids, function(id) {
+    start_time <- start_times[[id]]
+    valid_times <- sensors$datetime[sensors$deployid == id]
+    events %>%
+      filter(deployid == id,
+             # Filter out events near boundaries
+             datetime > start_time + buffer,
+             datetime < start_time + 3600 * t_train - buffer) %>%
+      mutate(datetime = set_nearest(datetime, valid_times))
+  })
+
+  # Check results
+  tryCatch({
+    stopifnot(
+      setequal(unique(test_sensors$deployid), unique(test_events$deployid)),
+      setequal(unique(train_sensors$deployid), unique(train_events$deployid))
     )
-  list(train_sensors = train_sensors,
-       train_events = train_events,
-       test_sensors = test_sensors,
-       test_events = test_events)
+    for (id in deployids) {
+      train_sensors_range <- range(filter(train_sensors, deployid == id)$datetime)
+      train_events_range <- range(filter(train_events, deployid == id)$datetime)
+      stopifnot(train_events_range[1] > train_sensors_range[1] + buffer,
+                train_events_range[2] < train_sensors_range[2] - buffer)
+    }
+    for (id in test_deployids) {
+      test_sensors_range <- range(filter(test_sensors, deployid == id)$datetime)
+      test_events_range <- range(filter(test_events, deployid == id)$datetime)
+      stopifnot(test_events_range[1] > test_sensors_range[1] + buffer,
+                test_events_range[2] < test_sensors_range[2] - buffer)
+    }
+  }, error = function(e) browser())
+
+  trial_dir <- file.path(data_dir, sprintf("%02.f", i))
+  dir.create(trial_dir)
+  saveRDS(train_sensors, file.path(trial_dir, "train_sensors.rds"))
+  saveRDS(train_events, file.path(trial_dir, "train_events.rds"))
+  saveRDS(test_sensors, file.path(trial_dir, "test_sensors.rds"))
+  saveRDS(test_events, file.path(trial_dir, "test_events.rds"))
+  trial_dir
 }
 
 ## Train models -----------------------------------------------------------
 
-train_stickleback <- function(sensors, events) {
-  sensors <- Sensors(sensors,
-                     "deployid",
-                     "datetime",
-                     c("depth", "pitch", "roll", "speed"))
-  events <- Events(events,
-                   "deployid",
-                   "datetime")
-  tsc <- compose_tsc(module = "interval_based",
-                     algorithm = "TimeSeriesForestClassifier",
-                     params = list(n_estimators = sb_trees),
-                     columns = columns(sensors))
-  sb <- Stickleback(tsc,
-                    win_size = win_size,
-                    tol = tol,
-                    nth = 5,
-                    n_folds = 4)
-  sb_fit(sb, sensors, events)
+train_stickleback <- function(trial_dir, params) {
+  sb_trees <- params$sb_trees
+  win_size <- params$win_size
+  tol <- params$tol
+
+  tryCatch({
+    sensors <- readRDS(file.path(trial_dir, "train_sensors.rds")) %>%
+      Sensors("deployid",
+              "datetime",
+              c("depth", "pitch", "roll", "speed"))
+    events <- readRDS(file.path(trial_dir, "train_events.rds")) %>%
+      Events("deployid",
+             "datetime")
+    tsc <- compose_tsc(module = "interval_based",
+                       algorithm = "TimeSeriesForestClassifier",
+                       params = list(n_estimators = sb_trees),
+                       columns = columns(sensors))
+    sb <- Stickleback(tsc,
+                      win_size = win_size,
+                      tol = tol,
+                      nth = 5,
+                      n_folds = 4)
+    sb_fit(sb, sensors, events)
+  }, error = function(e) browser())
   sb
 }
 
-train_randomforest <- function(sensors, events) {
-  features <- create_features(sensors)
+train_randomforest <- function(trial_dir, params) {
+  rf_trees <- params$rf_trees
+
+  sensors <- readRDS(file.path(trial_dir, "train_sensors.rds"))
+  events <- readRDS(file.path(trial_dir, "train_events.rds"))
+  features <- create_features(sensors, params)
   feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
   rf_form <- as.formula(sprintf("event ~ %s",
                                 paste(feat_cols, collapse = "+")))
   ranger(rf_form, features, num.trees = rf_trees)
 }
 
-test_stickleback <- function(m, sensors, events) {
+test_stickleback <- function(m, trial_dir) {
+  sensors <- readRDS(file.path(trial_dir, "test_sensors.rds"))
+  events <- readRDS(file.path(trial_dir, "test_events.rds"))
+
   d <- durations(sensors)
 
   sensors <- Sensors(sensors,
@@ -214,12 +337,15 @@ test_stickleback <- function(m, sensors, events) {
        delta_r = with(o, delta_r(tp, fp, fn, d)))
 }
 
-test_randomforest<- function(m, sensors, events) {
+test_randomforest<- function(m, trial_dir, params) {
+  sensors <- readRDS(file.path(trial_dir, "test_sensors.rds"))
+  events <- readRDS(file.path(trial_dir, "test_events.rds"))
+
   d <- durations(sensors)
-  features <- create_features(sensors)
+  features <- create_features(sensors, params)
 
   p <- predict(m, features)
-  o <- assess_rf(p, features, sensors, events)
+  o <- assess_rf(p, features, sensors, events, params)
 
   list(f1 = with(o, f1(tp, fp, fn)),
        delta_r = with(o, delta_r(tp, fp, fn, d)))
@@ -227,26 +353,21 @@ test_randomforest<- function(m, sensors, events) {
 
 # Run cross validation ----------------------------------------------------
 
-run_cv <- function(i, sensors, events) {
-  train_test <- split_data(sensors, events)
+cv_trial <- function(i, sensors, events, data_dir, params) {
+  # Split data
+  trial_dir <- split_data(sensors, events, data_dir, i, params)
 
   # Train models
-  sb <- train_stickleback(train_test$train_sensors, train_test$train_events)
-  rf <- train_randomforest(train_test$train_sensors, train_test$train_events)
+  sb <- train_stickleback(trial_dir, params)
+  rf <- train_randomforest(trial_dir, params)
 
   # Make and assess predictions
-  sb_results <- test_stickleback(sb,
-                                 train_test$test_sensors,
-                                 train_test$test_events)
-  rf_results <- test_randomforest(rf,
-                                  train_test$test_sensors,
-                                  train_test$test_events)
+  sb_results <- test_stickleback(sb, trial_dir)
+  rf_results <- test_randomforest(rf, trial_dir, params)
 
   # Results
   tibble(
     trial = i,
-    train_deployids = paste(unique(train_test$train_events$deployid),
-                            collapse = ", "),
     sb_f1 = sb_results$f1,
     sb_delta_r = sb_results$delta_r,
     rf_f1 = rf_results$f1,
@@ -254,7 +375,20 @@ run_cv <- function(i, sensors, events) {
   )
 }
 
+run_trials <- function(n_trials) {
+  data_dir <- sprintf("analysis/data/derived_data/cvtrials/%s",
+                      format(Sys.time(), "%Y%m%d%H%M"))
+  dir.create(data_dir)
+  results <- map_dfr(seq(params$n_trials),
+                     cv_trial,
+                     sensors = sensors,
+                     events = events,
+                     data_dir = data_dir,
+                     params = params)
+  write_csv(results, file.path(data_dir, "_results.csv"))
+  results
+}
+
 print(paste("Start:", Sys.time()))
-results <- map_dfr(seq(n_trials), run_cv, sensors = sensors, events = events)
+run_trials(n_trials)
 print(paste("Finish:", Sys.time()))
-write_csv(results, "analysis/data/derived_data/crossval.csv")
