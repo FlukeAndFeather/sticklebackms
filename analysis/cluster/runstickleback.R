@@ -10,7 +10,9 @@ library(zoo)
 
 # Parameters --------------------------------------------------------------
 
-test_local <- TRUE
+test_local <- FALSE
+
+# Rscript analysis/cluster/runstickleback.R 400 5 5 2 10 4 8 200 4
 
 if (!test_local) {
   args <- commandArgs(trailingOnly=TRUE)
@@ -192,28 +194,15 @@ split_data <- function(sensors, events, data_dir, i, params) {
   }
   train_events <- map_dfr(deployids, function(id) {
     start_time <- start_times[[id]]
-    valid_times <- sensors$datetime[sensors$deployid == id]
+    valid_times <- train_sensors$datetime[train_sensors$deployid == id]
+    max_time <- max(train_sensors$datetime[train_sensors$deployid == id])
     events %>%
         filter(deployid == id,
                # Filter out events near boundaries
                datetime > start_time + buffer,
-               datetime < start_time + 3600 * t_train - buffer) %>%
+               datetime < max_time - buffer) %>%
         mutate(datetime = set_nearest(datetime, valid_times))
   })
-
-  test_sample <- function(datetime) {
-    t0 <- datetime[1]
-    t1 <- datetime[length(datetime)]
-    frac <- runif(1)
-    rng <- as.numeric(t1 - t_train * 3600 - t0,
-                      unit = "secs")
-    if (rng < 0) {
-      sample_start <- t0
-    } else {
-      sample_start <- t0 + frac * rng
-    }
-    datetime >= sample_start & datetime <= sample_start + t_train * 3600
-  }
 
   # Needs refactoring SO BAD
   test_deployids <- sample(
@@ -329,7 +318,6 @@ test_stickleback <- function(m, trial_dir) {
   p <- sb_predict(m, sensors)
   o <- sb_assess(m, p, events) %>%
     as.data.frame() %>%
-    group_by(deployid) %>%
     summarize(tp = sum(outcome == "TP"),
               fp = sum(outcome == "FP"),
               fn = sum(outcome == "FN"))
@@ -362,7 +350,7 @@ cv_trial <- function(i, sensors, events, data_dir, params) {
   sb <- train_stickleback(trial_dir, params)
   rf <- train_randomforest(trial_dir, params)
 
-  # Make and assess predictions
+  # Test models
   sb_results <- test_stickleback(sb, trial_dir)
   rf_results <- test_randomforest(rf, trial_dir, params)
 
@@ -393,5 +381,5 @@ run_trials <- function(n_trials, parallel = FALSE) {
 
 print(paste("Start:", Sys.time()))
 plan(multisession, workers = params$n_cpu)
-run_trials(params$n_trials, parallel = FALSE)
+run_trials(params$n_trials, parallel = TRUE)
 print(paste("Finish:", Sys.time()))
