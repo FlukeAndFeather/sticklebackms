@@ -232,8 +232,8 @@ split_data <- function(sensors, events, data_dir, i, params) {
   })
   test_events <- map_dfr(test_deployids, function(id) {
     start_time <- start_times[[id]]
-    valid_times <- sensors$datetime[sensors$deployid == id]
-    max_time <- max(sensors$datetime[sensors$deployid == id])
+    valid_times <- test_sensors$datetime[test_sensors$deployid == id]
+    max_time <- max(test_sensors$datetime[test_sensors$deployid == id])
     events %>%
       filter(deployid == id,
              # Filter out events near boundaries
@@ -376,21 +376,22 @@ cv_trial <- function(i, sensors, events, data_dir, params) {
   )
 }
 
-run_trials <- function(n_trials) {
+run_trials <- function(n_trials, parallel = FALSE) {
   data_dir <- sprintf("analysis/data/derived_data/cvtrials/%s",
                       format(Sys.time(), "%Y%m%d%H%M"))
   dir.create(data_dir)
-  results <- future_map_dfr(seq(params$n_trials),
-                            cv_trial,
-                            sensors = sensors,
-                            events = events,
-                            data_dir = data_dir,
-                            params = params)
+  map_fn <- if (parallel) future_map_dfr else (map_dfr)
+  results <- map_fn(seq(params$n_trials),
+                    cv_trial,
+                    sensors = sensors,
+                    events = events,
+                    data_dir = data_dir,
+                    params = params)
   write_csv(results, file.path(data_dir, "_results.csv"))
   results
 }
 
 print(paste("Start:", Sys.time()))
 plan(multisession, workers = params$n_cpu)
-run_trials(params$n_trials)
+run_trials(params$n_trials, parallel = FALSE)
 print(paste("Finish:", Sys.time()))
