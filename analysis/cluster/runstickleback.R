@@ -12,7 +12,7 @@ library(zoo)
 
 test_local <- FALSE
 
-# Rscript analysis/cluster/runstickleback.R 400 5 5 2 10 4 8 200 4
+# Rscript analysis/cluster/runstickleback.R 150 5 8 4 8 4 8 200 10 8
 
 if (!test_local) {
   args <- commandArgs(trailingOnly=TRUE)
@@ -51,27 +51,6 @@ if (!test_local) {
 events <- arrow::read_parquet("analysis/data/raw_data/events.parquet") %>%
   filter(event == "lunge")
 sensors <- arrow::read_parquet("analysis/data/raw_data/sensors.parquet")
-
-## Fix data error ---------------------------------------------------------
-
-# Fix an error in deployment in bw180830-42 where 2 records are out of order
-# bw180830_42_old <- sensors %>%
-#   filter(deployid == "bw180830-42",
-#          lead(datetime, default = Sys.time()) > datetime)
-# dt <- range(bw180830_42_old$datetime)
-# bw180830_42 <- tibble(
-#   deployid = "bw180830-42",
-#   datetime = seq(dt[1], dt[2], by = 0.1)
-# )
-# for (col in c("depth", "pitch", "roll", "jerk", "speed")) {
-#   bw180830_42[[col]] <- approx(bw180830_42_old$datetime,
-#                                bw180830_42_old[[col]],
-#                                xout = bw180830_42$datetime)$y
-# }
-# sensors <- sensors %>%
-#   filter(deployid != "bw180830-42") %>%
-#   rbind(bw180830_42)
-# rm(dt, bw180830_42, col)
 
 # Fix an error where 5 deployments have missing speed values
 missing_speed <- c("bw180828-49", "bw180830-42", "bw180830-48", "bw180905-42")
@@ -143,19 +122,19 @@ assess_rf <- function(p, features, sensors, events, params) {
         e2 <- e %>%
           mutate(nearest = fdt[findInterval(datetime, fdt)],
                  error = abs(as.numeric(datetime - nearest, unit = "secs")),
-                 outcome = ifelse(error < tol, "tp", "fn"))
+                 outcome = ifelse(error < tol, "TP", "FN"))
       }, error = function(err) browser())
     }
     f2 <- anti_join(f, e2, by = c("deployid", "datetime"))
 
-    tibble(tp = sum(e2$outcome == "tp"),
-           fp = nrow(f2),
-           fn = sum(e2$outcome == "fn"))
+    bind_rows(
+      select(e2, deployid, datetime, outcome),
+      transmute(f2, deployid, datetime, outcome = "FP")
+    )
   }
   map_dfr(unique(events$deployid),
           ~ assess_deployment(filter(features, deployid == .x),
-                              filter(events, deployid == .x))) %>%
-    summarize(across(c(tp, fp, fn), sum))
+                              filter(events, deployid == .x)))
 }
 
 ## Split data into train/test ---------------------------------------------
@@ -317,13 +296,17 @@ test_stickleback <- function(m, trial_dir) {
 
   p <- sb_predict(m, sensors)
   o <- sb_assess(m, p, events) %>%
-    as.data.frame() %>%
-    summarize(tp = sum(outcome == "TP"),
-              fp = sum(outcome == "FP"),
-              fn = sum(outcome == "FN"))
+    as.data.frame()
 
-  list(f1 = with(o, f1(tp, fp, fn)),
-       delta_r = with(o, delta_r(tp, fp, fn, d)))
+  saveRDS(o, file.path(trial_dir, "_sbpredictions.rds"))
+
+  list(f1 = f1(sum(o$outcome == "TP"),
+               sum(o$outcome == "FP"),
+               sum(o$outcome == "FN")),
+       delta_r = delta_r(sum(o$outcome == "TP"),
+                         sum(o$outcome == "FP"),
+                         sum(o$outcome == "FN"),
+                         d))
 }
 
 test_randomforest<- function(m, trial_dir, params) {
@@ -336,8 +319,15 @@ test_randomforest<- function(m, trial_dir, params) {
   p <- predict(m, features)
   o <- assess_rf(p, features, sensors, events, params)
 
-  list(f1 = with(o, f1(tp, fp, fn)),
-       delta_r = with(o, delta_r(tp, fp, fn, d)))
+  saveRDS(o, file.path(trial_dir, "_rfpredictions.rds"))
+
+  list(f1 = f1(sum(o$outcome == "TP"),
+               sum(o$outcome == "FP"),
+               sum(o$outcome == "FN")),
+       delta_r = delta_r(sum(o$outcome == "TP"),
+                         sum(o$outcome == "FP"),
+                         sum(o$outcome == "FN"),
+                         d))
 }
 
 # Run cross validation ----------------------------------------------------
