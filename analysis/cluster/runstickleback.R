@@ -12,7 +12,7 @@ library(zoo)
 
 test_local <- FALSE
 
-# Rscript analysis/cluster/runstickleback.R 400 5 5 2 10 4 8 200 4
+# Rscript analysis/cluster/runstickleback.R 200 5 4 2 4 1 8 200 10 4
 
 if (!test_local) {
   args <- commandArgs(trailingOnly=TRUE)
