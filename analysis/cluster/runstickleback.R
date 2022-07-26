@@ -106,7 +106,7 @@ delta_r <- function(tp, fp, fn, d) {
 assess_rf <- function(p, features, events, params) {
   tol <- params$tol
   features <- features %>%
-    mutate(class = p$predictions) %>%
+    mutate(class = p) %>%
     filter(class == "event")
   assess_deployment <- function(f, e) {
     if (nrow(f) == 0) {
@@ -300,8 +300,7 @@ train_randomforest <- function(trial_dir, params, strategy = c("proba", "sample"
     if (max_prob > 0) {
       thr <- seq(0, max_prob, by = 0.01)[-1]
       thr_f1 <- function(thr) {
-        p <- pred
-        p$predictions <- ifelse(p$predictions[, 1] >= thr, "event", "non-event")
+        p <- ifelse(pred$predictions[, 1] >= thr, "event", "non-event")
         o <- assess_rf(p, feat_valid, events, params)
         f1(sum(o$outcome == "TP"),
            sum(o$outcome == "FP"),
