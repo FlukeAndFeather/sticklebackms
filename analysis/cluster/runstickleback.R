@@ -285,11 +285,15 @@ train_randomforest <- function(trial_dir, params) {
     sensors_secs <- as.numeric(sensors_dt - min(sensors_dt), unit = "secs")
     events_secs <- as.numeric(events_dt - min(sensors_dt), unit = "secs")
     w2 <- as.integer(window / 2)
-    for (e in events_secs) {
-      # assumes 10 Hz
+    event_window <- function(e) {
       i <- as.integer(e * 10) + 1
-      overlaps[(i - w2):(i + w2)] <- TRUE
+      (i - w2):(i + w2)
     }
+    event_idx <- map(events_secs, event_window) %>%
+      unlist() %>%
+      pmax(1) %>%
+      pmin(length(overlaps))
+    overlaps[event_idx] <- TRUE
     ifelse(overlaps, "event", "non-event")
   }
 
