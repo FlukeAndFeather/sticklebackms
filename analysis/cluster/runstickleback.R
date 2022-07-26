@@ -114,7 +114,7 @@ delta_r <- function(tp, fp, fn, d) {
 assess_rf <- function(p, features, events, params) {
   tol <- params$tol
   features <- features %>%
-    mutate(class = p) %>%
+    mutate(class = p$predictions) %>%
     filter(class == "event")
   assess_deployment <- function(f, e) {
     if (nrow(f) == 0) {
