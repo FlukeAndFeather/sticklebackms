@@ -33,15 +33,15 @@ if (!test_local) {
   )
 } else {
   params <- list(
-    win_size = 40L,
+    win_size = 150L,
     tol = 5,
-    n_train = 2L, # deployments
-    t_train = 1, # hours
-    n_test = 2L,
-    t_test = 1,
-    sb_trees = 2L,
-    rf_trees = 8L,
-    n_trials = 2L,
+    n_train = 8L, # deployments
+    t_train = 4, # hours
+    n_test = 8L,
+    t_test = 4,
+    sb_trees = 8L,
+    rf_trees = 200L,
+    n_trials = 10L,
     n_cpu = 2L
   )
 }
@@ -103,7 +103,7 @@ delta_r <- function(tp, fp, fn, d) {
   abs((r - r_hat) / r)
 }
 
-assess_rf <- function(p, features, sensors, events, params) {
+assess_rf <- function(p, features, events, params) {
   tol <- params$tol
   features <- features %>%
     mutate(class = p$predictions) %>%
@@ -135,6 +135,11 @@ assess_rf <- function(p, features, sensors, events, params) {
   map_dfr(unique(events$deployid),
           ~ assess_deployment(filter(features, deployid == .x),
                               filter(events, deployid == .x)))
+}
+
+predict_rf <- function(rf_thr, newdat) {
+  p <- predict(m_thr$randomforest, newdat)
+  ifelse(p$predictions[,1] >= rf_thr$thr, "event", "non-event")
 }
 
 ## Split data into train/test ---------------------------------------------
@@ -275,9 +280,34 @@ train_randomforest <- function(trial_dir, params) {
   events <- readRDS(file.path(trial_dir, "train_events.rds"))
   features <- create_features(sensors, params)
   feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
+
+  train_deployid <- sample(
+    unique(events$deployid),
+    size = max(round(length(unique(events$deployid)) * 0.8), 1)
+  )
+  feat_train <- filter(features, deployid %in% train_deployid)
+  feat_valid <- filter(features, !deployid %in% train_deployid)
+
   rf_form <- as.formula(sprintf("event ~ %s",
                                 paste(feat_cols, collapse = "+")))
-  ranger(rf_form, features, num.trees = rf_trees)
+  m <- ranger(rf_form, feat_train, num.trees = rf_trees, probability = TRUE)
+
+  browser()
+  pred <- predict(m, feat_valid)
+
+  thr <- seq(0, max(pred$predictions[,1]), length.out = 51)[-1]
+  thr_f1 <- function(thr) {
+    p <- pred
+    p$predictions <- ifelse(p$predictions[, 1] >= thr, "event", "non-event")
+    o <- assess_rf(p, feat_valid, events, params)
+    f1(sum(o$outcome == "TP"),
+       sum(o$outcome == "FP"),
+       sum(o$outcome == "FN"))
+  }
+  valid_f1 <- map_dbl(thr, thr_f1)
+  thr_hat <- thr[which.max(valid_f1)]
+
+  list(randomforest = m, thr = thr_hat)
 }
 
 test_stickleback <- function(m, trial_dir) {
@@ -316,8 +346,8 @@ test_randomforest<- function(m, trial_dir, params) {
   d <- durations(sensors)
   features <- create_features(sensors, params)
 
-  p <- predict(m, features)
-  o <- assess_rf(p, features, sensors, events, params)
+  p <- predict_rf(m, features)
+  o <- assess_rf(p, features, events, params)
 
   saveRDS(o, file.path(trial_dir, "_rfpredictions.rds"))
 
@@ -351,6 +381,7 @@ cv_trial <- function(i, sensors, events, data_dir, params) {
     sb_delta_r = sb_results$delta_r,
     rf_f1 = rf_results$f1,
     rf_delta_r = rf_results$delta_r,
+    rf_thr = rf$thr
   )
 }
 
