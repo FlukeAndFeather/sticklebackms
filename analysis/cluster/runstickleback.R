@@ -358,6 +358,8 @@ run_trials <- function(n_trials, parallel = FALSE) {
   data_dir <- sprintf("analysis/data/derived_data/cvtrials/%s",
                       format(Sys.time(), "%Y%m%d%H%M"))
   dir.create(data_dir)
+  writeLines(sprintf("%s = %s", names(params), as.character(params)),
+             file.path(data_dir, "params.txt"))
   map_fn <- if (parallel) future_map_dfr else (map_dfr)
   results <- map_fn(seq(params$n_trials),
                     cv_trial,
