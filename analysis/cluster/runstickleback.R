@@ -281,57 +281,41 @@ train_stickleback <- function(trial_dir, params) {
   sb
 }
 
-train_randomforest <- function(trial_dir, params, strategy = c("proba", "sample")) {
-  strategy = match.arg(strategy)
+train_randomforest <- function(trial_dir, params) {
   rf_trees <- params$rf_trees
+
+  # If a window overlaps an event call it an event
+  assign_class <- function(sensors_dt, events_dt, window) {
+    overlaps <- logical(length(sensors_dt))
+    sensors_secs <- as.numeric(sensors_dt - min(sensors_dt), unit = "secs")
+    events_secs <- as.numeric(events_dt - min(sensors_dt), unit = "secs")
+    w2 <- as.integer(window / 2)
+    for (e in events_secs) {
+      # assumes 10 Hz
+      i <- as.integer(e * 10) + 1
+      overlaps[(i - w2):(i + w2)] <- TRUE
+    }
+    ifelse(overlaps, "event", "non-event")
+  }
 
   sensors <- readRDS(file.path(trial_dir, "train_sensors.rds"))
   events <- readRDS(file.path(trial_dir, "train_events.rds"))
-  features <- create_features(sensors, params)
+  features <- create_features(sensors, params) %>%
+    group_by(deployid) %>%
+    mutate(class = assign_class(datetime,
+                                events$datetime[events$deployid == deployid[1]],
+                                params$win_size)) %>%
+    ungroup()
   feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
 
-  if (strategy == "proba") {
-    train_deployid <- sample(
-      unique(events$deployid),
-      size = max(round(length(unique(events$deployid)) * 0.8), 1)
-    )
-    feat_train <- filter(features, deployid %in% train_deployid)
-    feat_valid <- filter(features, !deployid %in% train_deployid)
-
-    rf_form <- as.formula(sprintf("event ~ %s",
-                                  paste(feat_cols, collapse = "+")))
-    m <- ranger(rf_form, feat_train, num.trees = rf_trees, probability = TRUE)
-
-    pred <- predict(m, feat_valid)
-
-    max_prob <- max(pred$predictions[,1])
-    if (max_prob > 0) {
-      thr <- seq(0, max_prob, by = 0.01)[-1]
-      thr_f1 <- function(thr) {
-        p <- ifelse(pred$predictions[, 1] >= thr, "event", "non-event")
-        o <- assess_rf(p, feat_valid, events, params)
-        f1(sum(o$outcome == "TP"),
-           sum(o$outcome == "FP"),
-           sum(o$outcome == "FN"))
-      }
-      valid_f1 <- map_dbl(thr, thr_f1)
-      thr_hat <- thr[which.max(valid_f1)]
-    } else {
-      thr_hat <- 0.
-    }
-  } else if (strategy == "sample") {
-    feat_events <- semi_join(features, events, by = c("deployid", "datetime"))
-    feat_nonevents <- features %>%
-      anti_join(feat_events, by = c("deployid", "datetime")) %>%
-      sample_n(nrow(feat_events))
-    feat_train <- rbind(feat_events, feat_nonevents)
-    rf_form <- as.formula(sprintf("event ~ %s",
-                                  paste(feat_cols, collapse = "+")))
-    m <- ranger(rf_form, feat_train, num.trees = rf_trees, probability = TRUE)
-    thr_hat <- 0.5
-  }
-
-  list(randomforest = m, thr = thr_hat)
+  w <- 1 / table(features$event)
+  w <- w / sum(w)
+  rf_form <- as.formula(sprintf("event ~ %s",
+                                paste(feat_cols, collapse = "+")))
+  ranger(rf_form,
+         features,
+         num.trees = rf_trees,
+         case.weights = w[features$event])
 }
 
 test_stickleback <- function(m, trial_dir) {
@@ -392,24 +376,19 @@ cv_trial <- function(i, sensors, events, data_dir, params) {
 
   # Train models
   sb <- train_stickleback(trial_dir, params)
-  rf_proba <- train_randomforest(trial_dir, params, "proba")
-  rf_sample <- train_randomforest(trial_dir, params, "sample")
+  rf <- train_randomforest(trial_dir, params)
 
   # Test models
   sb_results <- test_stickleback(sb, trial_dir)
-  rf_proba_results <- test_randomforest(rf_proba, trial_dir, params)
-  rf_sample_results <- test_randomforest(rf_sample, trial_dir, params)
+  rf_results <- test_randomforest(rf, trial_dir, params)
 
   # Results
   tibble(
     trial = i,
     sb_f1 = sb_results$f1,
     sb_delta_r = sb_results$delta_r,
-    rf_proba_f1 = rf_proba_results$f1,
-    rf_proba_delta_r = rf_proba_results$delta_r,
-    rf_proba_thr = rf_proba$thr,
-    rf_sample_f1 = rf_sample_results$f1,
-    rf_sample_delta_r = rf_sample_results$delta_r
+    rf_f1 = rf_results$f1,
+    rf_delta_r = rf_results$delta_r,
   )
 }
 
