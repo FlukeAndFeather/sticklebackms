@@ -1,5 +1,13 @@
 #!/usr/bin/env Rscript
 
+# Slurm uses system Python, which causes an issue in `library(rstickleback)`
+tryCatch(
+  reticulate::conda_version(),
+  error = function(e) reticulate::use_python(
+    system2("which", "python3", stdout = TRUE)
+  )
+)
+
 library(furrr)
 library(moments)
 library(ranger)
