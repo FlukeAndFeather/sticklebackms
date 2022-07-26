@@ -33,15 +33,15 @@ if (!test_local) {
   )
 } else {
   params <- list(
-    win_size = 150L,
+    win_size = 80L,
     tol = 5,
-    n_train = 8L, # deployments
-    t_train = 4, # hours
-    n_test = 8L,
-    t_test = 4,
-    sb_trees = 8L,
-    rf_trees = 200L,
-    n_trials = 10L,
+    n_train = 4L, # deployments
+    t_train = 2, # hours
+    n_test = 4L,
+    t_test = 2,
+    sb_trees = 4L,
+    rf_trees = 100L,
+    n_trials = 4L,
     n_cpu = 2L
   )
 }
@@ -384,20 +384,24 @@ cv_trial <- function(i, sensors, events, data_dir, params) {
 
   # Train models
   sb <- train_stickleback(trial_dir, params)
-  rf <- train_randomforest(trial_dir, params)
+  rf_proba <- train_randomforest(trial_dir, params, "proba")
+  rf_sample <- train_randomforest(trial_dir, params, "sample")
 
   # Test models
   sb_results <- test_stickleback(sb, trial_dir)
-  rf_results <- test_randomforest(rf, trial_dir, params)
+  rf_proba_results <- test_randomforest(rf_proba, trial_dir, params)
+  rf_sample_results <- test_randomforest(rf_sample, trial_dir, params)
 
   # Results
   tibble(
     trial = i,
     sb_f1 = sb_results$f1,
     sb_delta_r = sb_results$delta_r,
-    rf_f1 = rf_results$f1,
-    rf_delta_r = rf_results$delta_r,
-    rf_thr = rf$thr
+    rf_proba_f1 = rf_proba_results$f1,
+    rf_proba_delta_r = rf_proba_results$delta_r,
+    rf_proba_thr = rf_proba$thr,
+    rf_sample_f1 = rf_sample_results$f1,
+    rf_sample_delta_r = rf_sample_results$delta_r
   )
 }
 
