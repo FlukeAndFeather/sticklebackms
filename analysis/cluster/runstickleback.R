@@ -292,20 +292,24 @@ train_randomforest <- function(trial_dir, params) {
                                 paste(feat_cols, collapse = "+")))
   m <- ranger(rf_form, feat_train, num.trees = rf_trees, probability = TRUE)
 
-  browser()
   pred <- predict(m, feat_valid)
 
-  thr <- seq(0, max(pred$predictions[,1]), length.out = 51)[-1]
-  thr_f1 <- function(thr) {
-    p <- pred
-    p$predictions <- ifelse(p$predictions[, 1] >= thr, "event", "non-event")
-    o <- assess_rf(p, feat_valid, events, params)
-    f1(sum(o$outcome == "TP"),
-       sum(o$outcome == "FP"),
-       sum(o$outcome == "FN"))
+  max_prob <- max(pred$predictions[,1])
+  if (max_prob > 0) {
+    thr <- seq(0, max_prob, by = 0.01)[-1]
+    thr_f1 <- function(thr) {
+      p <- pred
+      p$predictions <- ifelse(p$predictions[, 1] >= thr, "event", "non-event")
+      o <- assess_rf(p, feat_valid, events, params)
+      f1(sum(o$outcome == "TP"),
+         sum(o$outcome == "FP"),
+         sum(o$outcome == "FN"))
+    }
+    valid_f1 <- map_dbl(thr, thr_f1)
+    thr_hat <- thr[which.max(valid_f1)]
+  } else {
+    thr_hat <- 0.
   }
-  valid_f1 <- map_dbl(thr, thr_f1)
-  thr_hat <- thr[which.max(valid_f1)]
 
   list(randomforest = m, thr = thr_hat)
 }
