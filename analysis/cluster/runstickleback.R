@@ -113,7 +113,7 @@ assess_rf <- function(p, features, sensors, events, params) {
       e2 <- e %>%
         mutate(nearest = NA,
                error = Inf,
-               outcome = "fn")
+               outcome = "FN")
     } else {
       tryCatch({
         fdt <- c(min(f$datetime, e$datetime) - 1,
