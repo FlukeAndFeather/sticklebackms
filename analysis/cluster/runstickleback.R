@@ -145,11 +145,6 @@ assess_rf <- function(p, features, events, params) {
                               filter(events, deployid == .x)))
 }
 
-predict_rf <- function(rf_thr, newdat) {
-  p <- predict(rf_thr$randomforest, newdat)
-  ifelse(p$predictions[,1] >= rf_thr$thr, "event", "non-event")
-}
-
 ## Split data into train/test ---------------------------------------------
 
 split_data <- function(sensors, events, data_dir, i, params) {
@@ -354,7 +349,7 @@ test_randomforest<- function(m, trial_dir, params) {
   d <- durations(sensors)
   features <- create_features(sensors, params)
 
-  p <- predict_rf(m, features)
+  p <- predict(m, features)
   o <- assess_rf(p, features, events, params)
 
   saveRDS(o, file.path(trial_dir, "_rfpredictions.rds"))
