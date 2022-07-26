@@ -294,7 +294,8 @@ train_randomforest <- function(trial_dir, params) {
       pmax(1) %>%
       pmin(length(overlaps))
     overlaps[event_idx] <- TRUE
-    ifelse(overlaps, "event", "non-event")
+    factor(ifelse(overlaps, "event", "non-event"),
+           levels = c("event", "non-event"))
   }
 
   sensors <- readRDS(file.path(trial_dir, "train_sensors.rds"))
@@ -307,14 +308,14 @@ train_randomforest <- function(trial_dir, params) {
     ungroup()
   feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
 
-  w <- 1 / table(features$event)
-  w <- w / sum(w)
+  w <- (1 / table(features$event)) %>%
+    { . / sum(.) }
   rf_form <- as.formula(sprintf("event ~ %s",
                                 paste(feat_cols, collapse = "+")))
   ranger(rf_form,
          features,
          num.trees = rf_trees,
-         case.weights = w[features$event])
+         class.weights = w)
 }
 
 test_stickleback <- function(m, trial_dir) {
