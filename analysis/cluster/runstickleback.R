@@ -273,7 +273,8 @@ train_stickleback <- function(trial_dir, params) {
   sb
 }
 
-train_randomforest <- function(trial_dir, params) {
+train_randomforest <- function(trial_dir, params, strategy = c("proba", "sample")) {
+  strategy = match.arg(strategy)
   rf_trees <- params$rf_trees
 
   sensors <- readRDS(file.path(trial_dir, "train_sensors.rds"))
@@ -281,34 +282,46 @@ train_randomforest <- function(trial_dir, params) {
   features <- create_features(sensors, params)
   feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
 
-  train_deployid <- sample(
-    unique(events$deployid),
-    size = max(round(length(unique(events$deployid)) * 0.8), 1)
-  )
-  feat_train <- filter(features, deployid %in% train_deployid)
-  feat_valid <- filter(features, !deployid %in% train_deployid)
+  if (strategy == "proba") {
+    train_deployid <- sample(
+      unique(events$deployid),
+      size = max(round(length(unique(events$deployid)) * 0.8), 1)
+    )
+    feat_train <- filter(features, deployid %in% train_deployid)
+    feat_valid <- filter(features, !deployid %in% train_deployid)
 
-  rf_form <- as.formula(sprintf("event ~ %s",
-                                paste(feat_cols, collapse = "+")))
-  m <- ranger(rf_form, feat_train, num.trees = rf_trees, probability = TRUE)
+    rf_form <- as.formula(sprintf("event ~ %s",
+                                  paste(feat_cols, collapse = "+")))
+    m <- ranger(rf_form, feat_train, num.trees = rf_trees, probability = TRUE)
 
-  pred <- predict(m, feat_valid)
+    pred <- predict(m, feat_valid)
 
-  max_prob <- max(pred$predictions[,1])
-  if (max_prob > 0) {
-    thr <- seq(0, max_prob, by = 0.01)[-1]
-    thr_f1 <- function(thr) {
-      p <- pred
-      p$predictions <- ifelse(p$predictions[, 1] >= thr, "event", "non-event")
-      o <- assess_rf(p, feat_valid, events, params)
-      f1(sum(o$outcome == "TP"),
-         sum(o$outcome == "FP"),
-         sum(o$outcome == "FN"))
+    max_prob <- max(pred$predictions[,1])
+    if (max_prob > 0) {
+      thr <- seq(0, max_prob, by = 0.01)[-1]
+      thr_f1 <- function(thr) {
+        p <- pred
+        p$predictions <- ifelse(p$predictions[, 1] >= thr, "event", "non-event")
+        o <- assess_rf(p, feat_valid, events, params)
+        f1(sum(o$outcome == "TP"),
+           sum(o$outcome == "FP"),
+           sum(o$outcome == "FN"))
+      }
+      valid_f1 <- map_dbl(thr, thr_f1)
+      thr_hat <- thr[which.max(valid_f1)]
+    } else {
+      thr_hat <- 0.
     }
-    valid_f1 <- map_dbl(thr, thr_f1)
-    thr_hat <- thr[which.max(valid_f1)]
-  } else {
-    thr_hat <- 0.
+  } else if (strategy == "sample") {
+    feat_events <- semi_join(sensors, events, by = c("deployid", "datetime"))
+    feat_nonevents <- sensors %>%
+      anti_join(feat_events, by = c("deployid", "datetime")) %>%
+      sample_n(nrow(feat_events))
+    feat_train <- rbind(feat_events, feat_nonevents)
+    rf_form <- as.formula(sprintf("event ~ %s",
+                                  paste(feat_cols, collapse = "+")))
+    m <- ranger(rf_form, feat_train, num.trees = rf_trees, probability = TRUE)
+    thr_hat <- 0.5
   }
 
   list(randomforest = m, thr = thr_hat)
