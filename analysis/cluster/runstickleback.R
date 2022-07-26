@@ -138,7 +138,7 @@ assess_rf <- function(p, features, events, params) {
 }
 
 predict_rf <- function(rf_thr, newdat) {
-  p <- predict(m_thr$randomforest, newdat)
+  p <- predict(rf_thr$randomforest, newdat)
   ifelse(p$predictions[,1] >= rf_thr$thr, "event", "non-event")
 }
 
@@ -313,8 +313,8 @@ train_randomforest <- function(trial_dir, params, strategy = c("proba", "sample"
       thr_hat <- 0.
     }
   } else if (strategy == "sample") {
-    feat_events <- semi_join(sensors, events, by = c("deployid", "datetime"))
-    feat_nonevents <- sensors %>%
+    feat_events <- semi_join(features, events, by = c("deployid", "datetime"))
+    feat_nonevents <- features %>%
       anti_join(feat_events, by = c("deployid", "datetime")) %>%
       sample_n(nrow(feat_events))
     feat_train <- rbind(feat_events, feat_nonevents)
