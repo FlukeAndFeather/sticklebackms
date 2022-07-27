@@ -59,8 +59,7 @@ sensors <- filter(sensors, !deployid %in% missing_speed)
 
 # Utility functions -------------------------------------------------------
 
-create_features <- function(sensors, params) {
-  win_size <- params$win_size
+create_features <- function(sensors, win_size) {
   roll_fn <- function(fn) {
     function(x) fn(x, n = win_size, fill = NA, align = "center")
   }
@@ -109,8 +108,79 @@ delta_r <- function(tp, fp, fn, d) {
   abs((r - r_hat) / r)
 }
 
-assess_rf <- function(p, features, events, params) {
-  tol <- params$tol
+fit_rf <- function(n_trees, win_size, sensors, events) {
+  # If a window overlaps an event call it an event
+  assign_class <- function(sensors_dt, events_dt, window) {
+    overlaps <- logical(length(sensors_dt))
+    sensors_secs <- as.numeric(sensors_dt - min(sensors_dt), unit = "secs")
+    events_secs <- as.numeric(events_dt - min(sensors_dt), unit = "secs")
+    w2 <- as.integer(window / 2)
+    event_window <- function(e) {
+      i <- as.integer(e * 10) + 1
+      (i - w2):(i + w2)
+    }
+    event_idx <- map(events_secs, event_window) %>%
+      unlist() %>%
+      pmax(1) %>%
+      pmin(length(overlaps))
+    overlaps[event_idx] <- TRUE
+    factor(ifelse(overlaps, "event", "non-event"),
+           levels = c("event", "non-event"))
+  }
+
+  features <- create_features(sensors, win_size) %>%
+    group_by(deployid) %>%
+    mutate(class = assign_class(datetime,
+                                events$datetime[events$deployid == deployid[1]],
+                                win_size)) %>%
+    ungroup()
+
+  feat_train <- rbind(
+    semi_join(features, events, by = c("deployid", "datetime")),
+    sample_n(filter(features, class == "non-event"), size = nrow(events) * 10)
+  )
+  feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
+
+  rf_form <- as.formula(sprintf("event ~ %s",
+                                paste(feat_cols, collapse = "+")))
+  ranger(rf_form,
+         feat_train,
+         num.trees = n_trees)
+}
+
+optim_rf <- function(sensors, events, win_size, n_trees, tol) {
+  deployids <- unique(events$deployid)
+  num_test <- max(1, as.integer(length(deployids) * 0.3))
+  test_deployid <- sample(deployids, num_test)
+  train_deployid <- setdiff(deployids, test_deployid)
+
+  train_sensors <- filter(sensors, !deployid %in% test_deployid)
+  train_events <- filter(events, !deployid %in% test_deployid)
+  test_sensors <- filter(sensors, deployid %in% test_deployid)
+  test_events <- filter(events, deployid %in% test_deployid)
+
+  rf_f1 <- function(win_size) {
+    m <- fit_rf(n_trees, win_size, train_sensors, train_events)
+    feat_test <- create_features(test_sensors, win_size)
+    predictions <- predict(m, feat_test)
+    o <- assess_rf(predictions, feat_test, test_events, tol)
+    f1(sum(o$outcome == "TP"),
+       sum(o$outcome == "FP"),
+       sum(o$outcome == "FN"))
+  }
+
+  win_opt <- seq(log(win_size / 10),
+                 log(win_size),
+                 length.out = 10) %>%
+    exp() %>%
+    as.integer()
+
+  par_f1 <- map_dbl(win_opt, rf_f1)
+
+  win_opt[which.max(par_f1)]
+}
+
+assess_rf <- function(p, features, events, tol) {
   features <- features %>%
     mutate(class = p$predictions) %>%
     filter(class == "event")
@@ -276,46 +346,20 @@ train_stickleback <- function(trial_dir, params) {
 
 train_randomforest <- function(trial_dir, params) {
   rf_trees <- params$rf_trees
-
-  # If a window overlaps an event call it an event
-  assign_class <- function(sensors_dt, events_dt, window) {
-    overlaps <- logical(length(sensors_dt))
-    sensors_secs <- as.numeric(sensors_dt - min(sensors_dt), unit = "secs")
-    events_secs <- as.numeric(events_dt - min(sensors_dt), unit = "secs")
-    w2 <- as.integer(window / 2)
-    event_window <- function(e) {
-      i <- as.integer(e * 10) + 1
-      (i - w2):(i + w2)
-    }
-    event_idx <- map(events_secs, event_window) %>%
-      unlist() %>%
-      pmax(1) %>%
-      pmin(length(overlaps))
-    overlaps[event_idx] <- TRUE
-    factor(ifelse(overlaps, "event", "non-event"),
-           levels = c("event", "non-event"))
-  }
+  win_size <- params$win_size
+  tol <- params$tol
 
   sensors <- readRDS(file.path(trial_dir, "train_sensors.rds"))
   events <- readRDS(file.path(trial_dir, "train_events.rds"))
-  features <- create_features(sensors, params) %>%
-    group_by(deployid) %>%
-    mutate(class = assign_class(datetime,
-                                events$datetime[events$deployid == deployid[1]],
-                                params$win_size)) %>%
-    ungroup()
 
-  feat_train <- rbind(
-    semi_join(features, events, by = c("deployid", "datetime")),
-    sample_n(filter(features, class == "non-event"), size = nrow(events) * 10)
+  trees_rng <- c(rf_trees / 2, rf_trees * 2)
+  win_rng <- c(win_size / 10, win_size)
+  rf_par <- optim_rf(sensors, events, win_size, rf_trees, tol)
+
+  list(
+    m = fit_rf(n_trees = rf_trees, win_size = rf_par, sensors, events),
+    win_size = rf_par[2]
   )
-  feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
-
-  rf_form <- as.formula(sprintf("event ~ %s",
-                                paste(feat_cols, collapse = "+")))
-  ranger(rf_form,
-         feat_train,
-         num.trees = rf_trees)
 }
 
 test_stickleback <- function(m, trial_dir, params) {
@@ -359,10 +403,10 @@ test_randomforest<- function(m, trial_dir, params) {
   events <- readRDS(file.path(trial_dir, "test_events.rds"))
 
   d <- durations(sensors)
-  features <- create_features(sensors, params)
+  features <- create_features(sensors, m$win_size)
 
-  p <- predict(m, features)
-  o <- assess_rf(p, features, events, params)
+  p <- predict(m$m, features)
+  o <- assess_rf(p, features, events, params$tol)
 
   saveRDS(o, file.path(trial_dir, "_rfpredictions.rds"))
 
@@ -396,6 +440,7 @@ cv_trial <- function(i, sensors, events, data_dir, params) {
     sb_delta_r = sb_results$delta_r,
     rf_f1 = rf_results$f1,
     rf_delta_r = rf_results$delta_r,
+    rf_winsz = rf$win_size
   )
 }
 
