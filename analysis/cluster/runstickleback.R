@@ -358,7 +358,7 @@ train_randomforest <- function(trial_dir, params) {
 
   list(
     m = fit_rf(n_trees = rf_trees, win_size = rf_par, sensors, events),
-    win_size = rf_par[2]
+    win_size = rf_par
   )
 }
 
