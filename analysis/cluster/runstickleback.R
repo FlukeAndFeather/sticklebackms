@@ -75,10 +75,16 @@ create_features <- function(sensors, params) {
     skew = roll_fn2(skewness),
     kurt = roll_fn2(kurtosis)
   )
+  feat_cols <- if (params$behavior == "lunge") {
+    c("depth", "pitch", "roll", "speed")
+  } else if (params$behavior == "breath") {
+    c("depth", "pitch", "roll", "jerk")
+  } else {
+    stop(sprintf("Unknown behavior '%s'", params$behavior))
+  }
   features <- sensors %>%
     group_by(deployid) %>%
-    mutate(across(c(depth, pitch, roll, speed),
-                  stat_fns)) %>%
+    mutate(across(feat_cols, stat_fns)) %>%
     ungroup() %>%
     left_join(events, by = c("deployid", "datetime")) %>%
     mutate(event = factor(ifelse(is.na(event), "non-event", "event"))) %>%
@@ -240,25 +246,31 @@ train_stickleback <- function(trial_dir, params) {
   win_size <- params$win_size
   tol <- params$tol
 
-  tryCatch({
-    sensors <- readRDS(file.path(trial_dir, "train_sensors.rds")) %>%
-      Sensors("deployid",
-              "datetime",
-              c("depth", "pitch", "roll", "speed"))
-    events <- readRDS(file.path(trial_dir, "train_events.rds")) %>%
-      Events("deployid",
-             "datetime")
-    tsc <- compose_tsc(module = "interval_based",
-                       algorithm = "TimeSeriesForestClassifier",
-                       params = list(n_estimators = sb_trees),
-                       columns = columns(sensors))
-    sb <- Stickleback(tsc,
-                      win_size = win_size,
-                      tol = tol,
-                      nth = 5,
-                      n_folds = 4)
-    sb_fit(sb, sensors, events)
-  }, error = function(e) browser())
+  sb_vars <- if (params$behavior == "lunge") {
+    c("depth", "pitch", "roll", "speed")
+  } else if (params$behavior == "breath") {
+    c("depth", "pitch", "roll", "jerk")
+  } else {
+    stop(sprintf("Unknown behavior '%s'", params$behavior))
+  }
+
+  sensors <- readRDS(file.path(trial_dir, "train_sensors.rds")) %>%
+    Sensors("deployid",
+            "datetime",
+            sb_vars)
+  events <- readRDS(file.path(trial_dir, "train_events.rds")) %>%
+    Events("deployid",
+           "datetime")
+  tsc <- compose_tsc(module = "interval_based",
+                     algorithm = "TimeSeriesForestClassifier",
+                     params = list(n_estimators = sb_trees),
+                     columns = columns(sensors))
+  sb <- Stickleback(tsc,
+                    win_size = win_size,
+                    tol = tol,
+                    nth = 5,
+                    n_folds = 4)
+  sb_fit(sb, sensors, events)
   sb
 }
 
@@ -304,16 +316,23 @@ train_randomforest <- function(trial_dir, params) {
          class.weights = w)
 }
 
-test_stickleback <- function(m, trial_dir) {
+test_stickleback <- function(m, trial_dir, params) {
   sensors <- readRDS(file.path(trial_dir, "test_sensors.rds"))
   events <- readRDS(file.path(trial_dir, "test_events.rds"))
 
   d <- durations(sensors)
 
+  sb_vars <- if (params$behavior == "lunge") {
+    c("depth", "pitch", "roll", "speed")
+  } else if (params$behavior == "breath") {
+    c("depth", "pitch", "roll", "jerk")
+  } else {
+    stop(sprintf("Unknown behavior '%s'", params$behavior))
+  }
   sensors <- Sensors(sensors,
                      "deployid",
                      "datetime",
-                     c("depth", "pitch", "roll", "speed"))
+                     sb_vars)
   events <- Events(events,
                    "deployid",
                    "datetime")
@@ -365,7 +384,7 @@ cv_trial <- function(i, sensors, events, data_dir, params) {
   rf <- train_randomforest(trial_dir, params)
 
   # Test models
-  sb_results <- test_stickleback(sb, trial_dir)
+  sb_results <- test_stickleback(sb, trial_dir, params)
   rf_results <- test_randomforest(rf, trial_dir, params)
 
   # Results
