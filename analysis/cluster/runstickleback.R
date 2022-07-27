@@ -20,47 +20,39 @@ library(zoo)
 
 test_local <- FALSE
 
-# Rscript analysis/cluster/runstickleback.R 150 5 8 4 8 4 8 200 10 8
+# Rscript analysis/cluster/runstickleback.R breath 150 5 8 4 8 4 8 200 10 8
 
 if (!test_local) {
   args <- commandArgs(trailingOnly=TRUE)
-  if (length(args) != 10) {
-    stop("Requires 10 arguments: win_size, tol, n_train, t_train, n_test, t_test, sb_trees, rf_trees, n_trials, n_cpu")
-  }
-  params <- list(
-    win_size = as.integer(args[1]),
-    tol = as.double(args[2]),
-    n_train = as.integer(args[3]), # deployments
-    t_train = as.double(args[4]), # hours
-    n_test = as.integer(args[5]),
-    t_test = as.double(args[6]),
-    sb_trees = as.integer(args[7]),
-    rf_trees = as.integer(args[8]),
-    n_trials = as.integer(args[9]),
-    n_cpu = as.integer(args[10])
-  )
 } else {
-  params <- list(
-    win_size = 80L,
-    tol = 5,
-    n_train = 4L, # deployments
-    t_train = 2, # hours
-    n_test = 4L,
-    t_test = 2,
-    sb_trees = 4L,
-    rf_trees = 100L,
-    n_trials = 4L,
-    n_cpu = 2L
-  )
+  args <- c("breath", "60", "3", "8", "4", "8", "4", "8", "200", "4", "2")
 }
+param_names <- c("behavior", "win_size", "tol", "n_train", "t_train",
+                 "n_test", "t_test", "sb_trees", "rf_trees", "n_trials",
+                 "n_cpu")
+
+if (length(args) != length(param_names)) {
+  stop(sprintf("Requires %i arguments: %s",
+               length(param_names),
+               paste(param_names, collapse = ", ")))
+}
+
+param_types <- str_split("cidididiiii", "")[[1]]
+params <- map2(args, param_types, function(a, t) {
+  switch (t,
+          c = as.character(a),
+          d = as.double(a),
+          i = as.integer(a))
+}) %>%
+  set_names(param_names)
 
 # Read data ---------------------------------------------------------------
 
 events <- arrow::read_parquet("analysis/data/raw_data/events.parquet") %>%
-  filter(event == "lunge")
+  filter(event == params$behavior)
 sensors <- arrow::read_parquet("analysis/data/raw_data/sensors.parquet")
 
-# Fix an error where 5 deployments have missing speed values
+# Fix an error where 4 deployments have missing speed values
 missing_speed <- c("bw180828-49", "bw180830-42", "bw180830-48", "bw180905-42")
 events <- filter(events, !deployid %in% missing_speed)
 sensors <- filter(sensors, !deployid %in% missing_speed)
@@ -118,27 +110,21 @@ assess_rf <- function(p, features, events, params) {
     filter(class == "event")
   assess_deployment <- function(f, e) {
     if (nrow(f) == 0) {
-      e2 <- e %>%
-        mutate(nearest = NA,
-               error = Inf,
-               outcome = "FN")
+      transmute(e, deployid, datetime, outcome = "FN")
     } else {
-      tryCatch({
-        fdt <- c(min(f$datetime, e$datetime) - 1,
-                 f$datetime,
-                 max(f$datetime, e$datetime + 1))
-        e2 <- e %>%
-          mutate(nearest = fdt[findInterval(datetime, fdt)],
-                 error = abs(as.numeric(datetime - nearest, unit = "secs")),
-                 outcome = ifelse(error < tol, "TP", "FN"))
-      }, error = function(err) browser())
+      fdt <- c(min(f$datetime, e$datetime) - 1,
+               f$datetime,
+               max(f$datetime, e$datetime + 1))
+      e2 <- e %>%
+        mutate(nearest = fdt[findInterval(datetime, fdt)],
+               error = abs(as.numeric(datetime - nearest, unit = "secs")),
+               outcome = ifelse(error < tol, "TP", "FN"))
+      f2 <- anti_join(f, e2, by = c("deployid", "datetime"))
+      bind_rows(
+        select(e2, deployid, datetime, outcome),
+        transmute(f2, deployid, datetime, outcome = "FP")
+      )
     }
-    f2 <- anti_join(f, e2, by = c("deployid", "datetime"))
-
-    bind_rows(
-      select(e2, deployid, datetime, outcome),
-      transmute(f2, deployid, datetime, outcome = "FP")
-    )
   }
   map_dfr(unique(events$deployid),
           ~ assess_deployment(filter(features, deployid == .x),
