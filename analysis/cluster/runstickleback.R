@@ -18,14 +18,14 @@ library(zoo)
 
 # Parameters --------------------------------------------------------------
 
-test_local <- FALSE
+test_local <- TRUE
 
 # Rscript analysis/cluster/runstickleback.R breath 150 5 8 4 8 4 8 200 10 8
 
 if (!test_local) {
   args <- commandArgs(trailingOnly=TRUE)
 } else {
-  args <- c("breath", "60", "3", "8", "4", "8", "4", "8", "200", "4", "2")
+  args <- c("lunge", "50", "5", "2", "1", "2", "1", "4", "100", "2", "1")
 }
 param_names <- c("behavior", "win_size", "tol", "n_train", "t_train",
                  "n_test", "t_test", "sb_trees", "rf_trees", "n_trials",
@@ -463,5 +463,5 @@ run_trials <- function(n_trials, parallel = FALSE) {
 
 print(paste("Start:", Sys.time()))
 plan(multisession, workers = params$n_cpu)
-run_trials(params$n_trials, parallel = TRUE)
+run_trials(params$n_trials, parallel = FALSE)
 print(paste("Finish:", Sys.time()))
