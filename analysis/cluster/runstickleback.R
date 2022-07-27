@@ -84,7 +84,7 @@ create_features <- function(sensors, params) {
   }
   features <- sensors %>%
     group_by(deployid) %>%
-    mutate(across(feat_cols, stat_fns)) %>%
+    mutate(across(all_of(feat_cols), stat_fns)) %>%
     ungroup() %>%
     left_join(events, by = c("deployid", "datetime")) %>%
     mutate(event = factor(ifelse(is.na(event), "non-event", "event"))) %>%
@@ -304,16 +304,18 @@ train_randomforest <- function(trial_dir, params) {
                                 events$datetime[events$deployid == deployid[1]],
                                 params$win_size)) %>%
     ungroup()
+
+  feat_train <- rbind(
+    semi_join(features, events, by = c("deployid", "datetime")),
+    sample_n(filter(features, class == "non-event"), size = nrow(events) * 10)
+  )
   feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
 
-  w <- (1 / table(features$event)) %>%
-    { . / sum(.) }
   rf_form <- as.formula(sprintf("event ~ %s",
                                 paste(feat_cols, collapse = "+")))
   ranger(rf_form,
-         features,
-         num.trees = rf_trees,
-         class.weights = w)
+         feat_train,
+         num.trees = rf_trees)
 }
 
 test_stickleback <- function(m, trial_dir, params) {
