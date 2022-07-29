@@ -242,15 +242,13 @@ split_data <- function(sensors, events, data_dir, i, params) {
     y[findInterval(x, y)]
   }
   train_events <- map_dfr(deployids, function(id) {
-    start_time <- start_times[[id]]
-    valid_times <- train_sensors$datetime[train_sensors$deployid == id]
-    max_time <- max(train_sensors$datetime[train_sensors$deployid == id])
+    sensor_dt <- train_sensors$datetime[train_sensors$deployid == id]
     events %>%
         filter(deployid == id,
                # Filter out events near boundaries
-               datetime > start_time + buffer,
-               datetime < max_time - buffer) %>%
-        mutate(datetime = set_nearest(datetime, valid_times))
+               datetime > min(sensor_dt) + buffer,
+               datetime < min(sensor_dt) - buffer) %>%
+        mutate(datetime = set_nearest(datetime, sensor_dt))
   })
 
   # Needs refactoring SO BAD
