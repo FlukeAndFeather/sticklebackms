@@ -217,15 +217,16 @@ split_data <- function(sensors, events, data_dir, i, params) {
   buffer <- win_size / 2 / 10 + 1
 
   # Randomly sample up to [t_train] hours of data from [n_train] deployments
-  deployids <- sample(unique(events$deployid), size = n_train, replace = FALSE)
-  get_start <- function(deployid) {
-    e_t <- events$datetime[events$deployid == deployid]
-    result <- sample(e_t, 1) - runif(1, buffer, t_train * 3600 - buffer)
+  train_ids <- sample(unique(events$deployid), size = n_train, replace = FALSE)
+  get_start <- function(id) {
+    e_dt <- sample(events$datetime[events$deployid == id], 1)
+    offset <- runif(1, buffer, t_train * 3600 - buffer)
+    e_dt - offset
   }
-  start_times <- map(deployids, get_start)
-  names(start_times) <- deployids
-  train_sensors <- map_dfr(deployids, function(id) {
-    start_time <- start_times[[id]]
+  train_start <- map(train_ids, get_start)
+  names(train_start) <- train_ids
+  train_sensors <- map_dfr(train_ids, function(id) {
+    start_time <- train_start[[id]]
     sensors %>%
       filter(deployid == id,
              datetime >= start_time,
@@ -241,41 +242,39 @@ split_data <- function(sensors, events, data_dir, i, params) {
 
     y[findInterval(x, y)]
   }
-  train_events <- map_dfr(deployids, function(id) {
+  train_events <- map_dfr(train_ids, function(id) {
     sensor_dt <- train_sensors$datetime[train_sensors$deployid == id]
     events %>%
         filter(deployid == id,
                # Filter out events near boundaries
                datetime > min(sensor_dt) + buffer,
-               datetime < min(sensor_dt) - buffer) %>%
+               datetime < max(sensor_dt) - buffer) %>%
         mutate(datetime = set_nearest(datetime, sensor_dt))
   })
 
   # Needs refactoring SO BAD
-  test_deployids <- sample(
-    setdiff(unique(events$deployid), deployids),
+  test_ids <- sample(
+    setdiff(unique(events$deployid), train_ids),
     size = n_test,
     replace = FALSE
   )
-  start_times <- map(test_deployids, get_start)
-  names(start_times) <- test_deployids
-  test_sensors <- map_dfr(test_deployids, function(id) {
-    start_time <- start_times[[id]]
+  test_start <- map(test_ids, get_start)
+  names(test_start) <- test_ids
+  test_sensors <- map_dfr(test_ids, function(id) {
+    start_time <- test_start[[id]]
     sensors %>%
       filter(deployid == id,
              datetime >= start_time,
              datetime <= start_time + 3600 * t_train)
   })
-  test_events <- map_dfr(test_deployids, function(id) {
-    start_time <- start_times[[id]]
-    valid_times <- test_sensors$datetime[test_sensors$deployid == id]
-    max_time <- max(test_sensors$datetime[test_sensors$deployid == id])
+  test_events <- map_dfr(test_ids, function(id) {
+    sensor_dt <- test_sensors$datetime[test_sensors$deployid == id]
     events %>%
       filter(deployid == id,
              # Filter out events near boundaries
-             datetime > start_time + buffer,
-             datetime < max_time - buffer) %>%
-      mutate(datetime = set_nearest(datetime, valid_times))
+             datetime > min(sensor_dt) + buffer,
+             datetime < max(sensor_dt) - buffer) %>%
+      mutate(datetime = set_nearest(datetime, sensor_dt))
   })
 
   # Check results
@@ -284,13 +283,13 @@ split_data <- function(sensors, events, data_dir, i, params) {
       setequal(unique(test_sensors$deployid), unique(test_events$deployid)),
       setequal(unique(train_sensors$deployid), unique(train_events$deployid))
     )
-    for (id in deployids) {
+    for (id in train_ids) {
       train_sensors_range <- range(filter(train_sensors, deployid == id)$datetime)
       train_events_range <- range(filter(train_events, deployid == id)$datetime)
       stopifnot(train_events_range[1] > train_sensors_range[1] + buffer,
                 train_events_range[2] < train_sensors_range[2] - buffer)
     }
-    for (id in test_deployids) {
+    for (id in test_ids) {
       test_sensors_range <- range(filter(test_sensors, deployid == id)$datetime)
       test_events_range <- range(filter(test_events, deployid == id)$datetime)
       stopifnot(test_events_range[1] > test_sensors_range[1] + buffer,
