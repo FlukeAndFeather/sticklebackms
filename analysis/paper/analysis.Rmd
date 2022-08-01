@@ -1,0 +1,81 @@
+---
+title: "Stickleback case study analysis"
+author: "Max Czapanskiy"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "../figures/",
+  dpi = 600
+)
+library(cowplot)
+library(tidyverse)
+```
+
+```{r load_results}
+breath_cv_id <- "202207301206"
+breath_cv_dir <- file.path("analysis/data/derived_data/cvtrials", breath_cv_id)
+breath_results <- read_csv(file.path(breath_cv_dir, "_results.csv"))
+
+lunge_cv_id <- "202207281344"
+lunge_cv_dir <- file.path("analysis/data/derived_data/cvtrials", lunge_cv_id)
+lunge_results <- read_csv(file.path(lunge_cv_dir, "_results.csv"))
+
+results <- rbind(
+  mutate(breath_results, behavior = "Breath"),
+  mutate(lunge_results, behavior = "Lunge")
+)
+
+results_long <- results %>%
+  pivot_longer(-c(behavior, trial, rf_winsz), names_to = "metric") %>%
+  mutate(model = factor(str_sub(metric, 1, 2),
+                        levels = c("sb", "rf"),
+                        labels = c("Stickleback", "Random forest")),
+         metric = factor(str_sub(metric, 4),
+                         levels = c("f1", "delta_r"),
+                         labels = c("F1", "delta[r]"))) %>%
+  relocate(model, .after = trial)
+```
+
+## Model performance metrics
+
+- 2x models (Stickleback, random forest)
+- 2x behaviors (breathing, lunge feeding)
+- 2x performance metrics ($F1$, $\delta_r$)
+
+```{r model_perf}
+f1_deltar_plots <- results_long %>%
+  group_by(metric, behavior) %>%
+  group_map(function(results, group) {
+    label_fn <- if (group$metric == "delta[r]") {
+      scales::percent
+    } else {
+      scales::number
+    }
+    y_title <- parse(text = as.character(group$metric))
+
+    ggplot(results, aes(model, value)) +
+      geom_boxplot() +
+      scale_y_continuous(y_title, labels = label_fn) +
+      expand_limits(y = 0) +
+      labs(x = group$behavior) +
+      theme_bw(base_size = 10) +
+      theme()
+  })
+
+f1_deltar_plot <- plot_grid(plotlist = f1_deltar_plots,
+                            ncol = 2,
+                            align = "v",
+                            axis = "lr",
+                            labels = "auto")
+```
+
+```{r model_perf_plot, fig.dim=c(4.72, 4.72)}
+f1_deltar_plot
+```
+
