@@ -108,6 +108,17 @@ delta_r <- function(tp, fp, fn, d) {
   abs((r - r_hat) / r)
 }
 
+nearest <- function(x, y) {
+  # Find closest element in y to each element in x
+  # Assumes both sorted
+  stopifnot(!is.unsorted(x), !is.unsorted(y))
+  x_left <- pmax(findInterval(x, y), 1)
+  x_right <- pmin(findInterval(x, y) + 1, length(y))
+  err_left <- abs(x - y[x_left])
+  err_right <- abs(x - y[x_right])
+  ifelse(err_left < err_right, y[x_left], y[x_right])
+}
+
 fit_rf <- function(n_trees, win_size, sensors, events) {
   # If a window overlaps an event call it an event
   assign_class <- function(sensors_dt, events_dt, window) {
@@ -188,18 +199,16 @@ assess_rf <- function(p, features, events, tol) {
     if (nrow(f) == 0) {
       transmute(e, deployid, datetime, outcome = "FN")
     } else {
-      fdt <- c(min(f$datetime, e$datetime) - 1,
-               f$datetime,
-               max(f$datetime, e$datetime + 1))
       e2 <- e %>%
-        mutate(nearest = fdt[findInterval(datetime, fdt)],
-               error = abs(as.numeric(datetime - nearest, unit = "secs")),
-               outcome = ifelse(error < tol, "TP", "FN"))
+        mutate(near_feat = nearest(datetime, f$datetime),
+               error = abs(as.numeric(datetime - near_feat, unit = "secs")),
+               outcome = ifelse(error <= tol, "TP", "FN"))
       f2 <- anti_join(f, e2, by = c("deployid", "datetime"))
       bind_rows(
         select(e2, deployid, datetime, outcome),
         transmute(f2, deployid, datetime, outcome = "FP")
-      )
+      ) %>%
+        arrange(datetime)
     }
   }
   map_dfr(unique(events$deployid),
