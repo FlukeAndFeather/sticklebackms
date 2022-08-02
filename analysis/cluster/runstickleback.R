@@ -116,7 +116,7 @@ nearest <- function(x, y) {
   x_right <- pmin(findInterval(x, y) + 1, length(y))
   err_left <- abs(x - y[x_left])
   err_right <- abs(x - y[x_right])
-  ifelse(err_left < err_right, y[x_left], y[x_right])
+  if_else(err_left < err_right, y[x_left], y[x_right])
 }
 
 fit_rf <- function(n_trees, win_size, sensors, events) {
@@ -150,13 +150,17 @@ fit_rf <- function(n_trees, win_size, sensors, events) {
     semi_join(features, events, by = c("deployid", "datetime")),
     sample_n(filter(features, class == "non-event"), size = nrow(events) * 10)
   )
+
   feat_cols <- colnames(features)[grepl(".*_.*", colnames(features))]
 
   rf_form <- as.formula(sprintf("event ~ %s",
                                 paste(feat_cols, collapse = "+")))
+  rf_seed <- runif(1, 1, 1e4)
+  cat("rf_seed = ", rf_seed, "\n")
   ranger(rf_form,
          feat_train,
-         num.trees = n_trees)
+         num.trees = n_trees,
+         seed = rf_seed)
 }
 
 optim_rf <- function(sensors, events, win_size, n_trees, tol) {
@@ -241,16 +245,7 @@ split_data <- function(sensors, events, data_dir, i, params) {
              datetime >= start_time,
              datetime <= start_time + 3600 * t_train)
   })
-  set_nearest <- function(x, y) {
-    # Assumes both are sorted
-    stopifnot(!is.unsorted(x),
-              !is.unsorted(y))
-    # Assumes x within y
-    stopifnot(x[1] > y[1],
-              x[length(x)] < y[length(y)])
 
-    y[findInterval(x, y)]
-  }
   train_events <- map_dfr(train_ids, function(id) {
     sensor_dt <- train_sensors$datetime[train_sensors$deployid == id]
     events %>%
@@ -258,10 +253,9 @@ split_data <- function(sensors, events, data_dir, i, params) {
                # Filter out events near boundaries
                datetime > min(sensor_dt) + buffer,
                datetime < max(sensor_dt) - buffer) %>%
-        mutate(datetime = set_nearest(datetime, sensor_dt))
+        mutate(datetime = nearest(datetime, sensor_dt))
   })
 
-  # Needs refactoring SO BAD
   test_ids <- sample(
     setdiff(unique(events$deployid), train_ids),
     size = n_test,
@@ -283,28 +277,8 @@ split_data <- function(sensors, events, data_dir, i, params) {
              # Filter out events near boundaries
              datetime > min(sensor_dt) + buffer,
              datetime < max(sensor_dt) - buffer) %>%
-      mutate(datetime = set_nearest(datetime, sensor_dt))
+      mutate(datetime = nearest(datetime, sensor_dt))
   })
-
-  # Check results
-  tryCatch({
-    stopifnot(
-      setequal(unique(test_sensors$deployid), unique(test_events$deployid)),
-      setequal(unique(train_sensors$deployid), unique(train_events$deployid))
-    )
-    for (id in train_ids) {
-      train_sensors_range <- range(filter(train_sensors, deployid == id)$datetime)
-      train_events_range <- range(filter(train_events, deployid == id)$datetime)
-      stopifnot(train_events_range[1] > train_sensors_range[1] + buffer,
-                train_events_range[2] < train_sensors_range[2] - buffer)
-    }
-    for (id in test_ids) {
-      test_sensors_range <- range(filter(test_sensors, deployid == id)$datetime)
-      test_events_range <- range(filter(test_events, deployid == id)$datetime)
-      stopifnot(test_events_range[1] > test_sensors_range[1] + buffer,
-                test_events_range[2] < test_sensors_range[2] - buffer)
-    }
-  }, error = function(e) browser())
 
   trial_dir <- file.path(data_dir, sprintf("%02.f", i))
   dir.create(trial_dir)
@@ -337,15 +311,24 @@ train_stickleback <- function(trial_dir, params) {
   events <- readRDS(file.path(trial_dir, "train_events.rds")) %>%
     Events("deployid",
            "datetime")
+
+  tsc_seed <- as.integer(runif(1, 1, 1e4))
+  sb_seed <- as.integer(runif(1, 1, 1e4))
+
+  cat("tsc_seed = ", tsc_seed, "\n")
+  cat("sb_seed = ", sb_seed, "\n")
+
   tsc <- compose_tsc(module = "interval_based",
                      algorithm = "TimeSeriesForestClassifier",
-                     params = list(n_estimators = sb_trees),
+                     params = list(n_estimators = sb_trees,
+                                   random_state = tsc_seed),
                      columns = columns(sensors))
   sb <- Stickleback(tsc,
                     win_size = win_size,
                     tol = tol,
                     nth = 5,
-                    n_folds = 4)
+                    n_folds = 4,
+                    seed = sb_seed)
   sb_fit(sb, sensors, events)
   sb
 }
@@ -456,7 +439,11 @@ run_trials <- function(n_trials, parallel = FALSE) {
   dir.create(data_dir)
   writeLines(sprintf("%s = %s", names(params), as.character(params)),
              file.path(data_dir, "params.txt"))
-  map_fn <- if (parallel) future_map_dfr else (map_dfr)
+  map_fn <- if (parallel) {
+    partial(future_map_dfr, .options = furrr_options(seed = 1234))
+  } else {
+    map_dfr
+  }
   results <- map_fn(seq(params$n_trials),
                     cv_trial,
                     sensors = sensors,
