@@ -48,6 +48,8 @@ results_long <- results %>%
 - 2x behaviors (breathing, lunge feeding)
 - 2x performance metrics ($F1$, $\delta_r$)
 
+As figure:
+
 ```{r model_perf}
 f1_deltar_plots <- results_long %>%
   group_by(metric, behavior) %>%
@@ -68,8 +70,34 @@ f1_deltar_plots <- results_long %>%
       theme()
   })
 
-f1_deltar_plot <- plot_grid(plotlist = f1_deltar_plots,
-                            ncol = 2,
+f1_plot <- filter(results_long, metric == "F1") %>% 
+  ggplot(aes(model, value, color = model)) +
+  geom_boxplot() +
+  scale_y_continuous("F1") +
+  scale_color_manual(values = c("Random forest" = "red",
+                                "Stickleback" = "blue")) +
+  expand_limits(y = c(0, 1)) +
+  facet_grid(cols = vars(behavior)) +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        legend.position = "none",
+        strip.background = element_rect(fill = "white"))
+
+deltar_plot <- filter(results_long, metric == "delta[r]") %>% 
+  ggplot(aes(model, value, color = model)) +
+  geom_boxplot() +
+  scale_y_continuous(bquote(delta[r]), labels = scales::percent) +
+  scale_color_manual(values = c("Random forest" = "red",
+                                "Stickleback" = "blue")) +
+  facet_grid(cols = vars(behavior)) +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        legend.position = "none",
+        strip.background = element_rect(fill = "white"))
+
+
+f1_deltar_plot <- plot_grid(f1_plot, deltar_plot,
+                            nrow = 2,
                             align = "v",
                             axis = "lr",
                             labels = "auto")
@@ -77,5 +105,125 @@ f1_deltar_plot <- plot_grid(plotlist = f1_deltar_plots,
 
 ```{r model_perf_plot, fig.dim=c(4.72, 4.72)}
 f1_deltar_plot
+```
+
+As table:
+
+```{r model_perf_table, comment=""}
+format_metric <- function(metric, metric_mean, metric_sd) {
+  format_string <- ifelse(
+    metric == "delta[r]",
+    "$%.3g\\%% \\pm %.3g\\%%$",
+    "$%.3g \\pm %.3g$"
+  )
+  replace_exp <- function(s) {
+    e <- parse_number(str_match(s, "([0-9.]+e[+-][0-9]+)")[,2])
+    ifelse(is.na(e),
+           s,
+           str_replace(s, "[0-9.]+e[+-][0-9]+", as.character(signif(e, 3))))
+  }
+  sprintf(format_string, metric_mean, metric_sd) %>%
+    replace_exp()
+}
+
+results_long %>%
+  group_by(metric, model, behavior) %>%
+  summarize(across(-c(trial, rf_winsz), list(mean = mean, sd = sd)),
+            .groups = "drop") %>%
+  mutate(
+    across(starts_with("value"),
+           ~ ifelse(metric == "delta[r]", .x * 100, .x)),
+    label = format_metric(metric, value_mean, value_sd),
+    metric = sprintf("$%s$", ifelse(metric == "F1", "F1", "\\delta_r"))
+  ) %>%
+  select(-value_mean, -value_sd) %>%
+  pivot_wider(names_from = c(behavior, model),
+              names_sep = " ",
+              values_from = label) %>%
+  select(metric, starts_with("Breath"), starts_with("Lunge")) %>%
+  knitr::kable(escape = FALSE,
+               col.names = c("", rep(c("Stickleback", "Random forest"), 2)),
+               booktabs = TRUE) %>%
+  kableExtra::add_header_above(c("", Breath = 2, Lunge = 2))
+```
+
+## Prediction outcomes
+
+Stickleback predicted mostly TPs but random forest mostly FPs, which inflated the $\delta_r$.
+
+```{r pred_outcomes}
+read_predictions <- function(cv_dir) {
+  cv_behavior <- substr(readLines(file.path(cv_dir, "params.txt"))[1], 12, 100)
+  read_trial <- function(trial_dir) {
+    model_predictions <- dir(trial_dir, 
+                             pattern = "predictions.rds", 
+                             full.names = TRUE)
+    read_model <- function(pred_path) {
+      readRDS(pred_path) %>% 
+        mutate(trial = basename(trial_dir),
+               model = if (substr(basename(pred_path), 2, 3) == "rf") {
+                 "Random forest"
+               } else {
+                 "Stickleback"
+               })
+    }
+    map_dfr(model_predictions, read_model)
+  }
+  
+  map_dfr(dir(cv_dir, pattern = "[0-9]{2}", full.names = TRUE), read_trial) %>% 
+    mutate(behavior = cv_behavior)
+}
+
+predictions_long <- rbind(
+  read_predictions(breath_cv_dir),
+  read_predictions(lunge_cv_dir)
+)
+
+predictions_summary <- predictions_long %>% 
+  group_by(behavior, model, trial, outcome) %>% 
+  summarize(N = n(), .groups = "drop_last") %>% 
+  mutate(frac = N / sum(N)) %>% 
+  ungroup() %>% 
+  mutate(behavior = str_to_title(behavior),
+         outcome = factor(outcome, levels = c("TP", "FP", "FN")),
+         model = factor(model, levels = c("Stickleback", "Random forest")))
+
+outcome_plot <- ggplot(predictions_summary, aes(outcome, frac, color = model)) +
+  geom_boxplot(size = 0.5) +
+  expand_limits(y = c(0, 1)) +
+  scale_y_continuous("Predictions", labels = scales::percent) +
+  scale_color_manual(values = c("Stickleback" = "blue",
+                                "Random forest" = "red")) +
+  facet_grid(cols = vars(behavior), scales = "free_y") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        legend.position = "bottom",
+        legend.title = element_blank(),
+        strip.background = element_rect(fill = NA))
+```
+
+```{r outcome_plot, fig.dim=c(4.72, 4.72)}
+outcome_plot
+```
+
+## Window sizes
+
+Optimal window size for the random forest.
+
+```{r rf_win}
+read_winsz <- function(cv_dir) {
+  cv_behavior <- substr(readLines(file.path(cv_dir, "params.txt"))[1], 12, 100)
+  file.path(cv_dir, "_results.csv") %>% 
+    read_csv(show_col_types = FALSE) %>% 
+    transmute(trial, winsz = rf_winsz, behavior = cv_behavior)
+}
+
+rbind(
+  read_winsz(breath_cv_dir),
+  read_winsz(lunge_cv_dir)
+) %>% 
+  group_by(behavior) %>% 
+  summarize(across(winsz, list(mean = mean, sd = sd))) %>% 
+  mutate(across(starts_with("winsz"), ~ round(.x / 10, 1)))
 ```
 
