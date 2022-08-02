@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 #SBATCH --job-name=runstickleback
+#SBATCH -p hns
 #
 #SBATCH --time=6:00:00
 #SBATCH --ntasks=1
